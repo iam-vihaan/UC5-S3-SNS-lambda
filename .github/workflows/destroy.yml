@@ -1,0 +1,103 @@
+name: destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform (apply or destroy)'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+
+env:
+  TF_VERSION: "1.12.0"
+  AWS_REGION: "ap-south-1"
+  AWS_ROLE_ARN: "arn:aws:iam::211125325699:role/Demo_Access"  
+
+jobs:
+  lint-and-security:
+    name: Lint and Security Checks
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: ./Infra
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install TFLint
+        run: |
+          wget https://github.com/terraform-linters/tflint/releases/download/v0.50.2/tflint_linux_amd64.zip
+          unzip tflint_linux_amd64.zip
+          sudo mv tflint /usr/local/bin/
+          tflint --version
+
+      - name: Run TFLint
+        run: tflint --init && tflint -f compact
+
+      - name: Run Checkov (soft fail)
+        uses: bridgecrewio/checkov-action@v12.2458.0
+        with:
+          directory: .
+          soft_fail: true
+
+  terraform-plan_apply:
+    if: github.event_name == 'pull_request'
+    runs-on: self-hosted
+    needs: lint-and-security
+    name: Terraform Plan
+    defaults:
+      run:
+        working-directory: ./Infra
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Initialize Terraform
+        run: terraform init 
+
+      - name: Terraform test
+        run: |
+         terraform test
+        continue-on-error: true   
+
+      - name: Terraform fmt
+        run: terraform fmt -recursive
+
+      - name: Validate Terraform
+        run: terraform validate
+
+      - name: Generate Terraform Plan
+        run: terraform plan
+
+      - name: Terraform Apply or Destroy
+        run: |
+              if [ "${{ github.event.inputs.action }}" == "apply" ]; then
+                terraform apply -auto-approve
+              elif [ "${{ github.event.inputs.action }}" == "destroy" ]; then
+                terraform destroy -auto-approve
+              fi
